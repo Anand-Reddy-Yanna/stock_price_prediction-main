@@ -12,11 +12,15 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import os
 import tempfile
 
-# TensorFlow / Keras
-import tensorflow as tf
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
+# TensorFlow / Keras with fallback for environments where tensorflow.keras isn't resolved by linter
+try:
+    from tensorflow.keras.models import Sequential, load_model  # type: ignore
+    from tensorflow.keras.layers import LSTM, Dense, Dropout  # type: ignore
+    from tensorflow.keras.callbacks import EarlyStopping  # type: ignore
+except Exception:  # fallback to standalone keras
+    from keras.models import Sequential, load_model
+    from keras.layers import LSTM, Dense, Dropout
+    from keras.callbacks import EarlyStopping
 
 st.set_page_config(layout="wide", page_title="Upgraded Stock Predictor")
 st.title("📈 Stock Price Predictor")

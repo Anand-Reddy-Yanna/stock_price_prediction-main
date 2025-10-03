@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+venv/
+.env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models & artifacts
+*.h5
+*.keras
+*.pb
+*.tflite
+*.onnx
+*.ckpt
+
+# Logs & temp
+*.log
+*.tmp
+*.temp
+*.cache/
+
+# Streamlit cache
+.streamlit/
+
+# TensorBoard
+logs/
