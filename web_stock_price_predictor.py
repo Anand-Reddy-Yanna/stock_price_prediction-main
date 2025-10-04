@@ -195,12 +195,10 @@ with right:
     stats = df['Close'].describe().rename(index={'50%':'median'})
     st.write(stats)
 
-# ---------------------------
-# Forecasting
-# ---------------------------
+# === Forecasting ===
 st.subheader("🔮 Forecasting")
 
-scaler = MinMaxScaler(feature_range=(0,1))
+scaler = MinMaxScaler(feature_range=(0, 1))
 scaled = scaler.fit_transform(df[['Close']].values)
 
 orig_lookback = int(lookback)
@@ -219,11 +217,23 @@ if X.ndim == 2:
 model_dir = tempfile.gettempdir()
 model_path = os.path.join(model_dir, f"{ticker}_lstm.h5")
 
+# Training / loading model
 try:
-    if retrain or not os.path.exists(model_path):
+    need_train = retrain or (not os.path.exists(model_path))
+    if need_train:
         model = build_lstm_model((X.shape[1], 1))
-        es = EarlyStopping(monitor="loss", patience=3, restore_best_weights=True)
-        model.fit(X, y, epochs=int(train_epochs), batch_size=int(batch_size), verbose=0, callbacks=[es])
+
+        # Early stopping (validation if enough data, else fallback to training loss)
+        use_val = X.shape[0] >= 30
+        if use_val:
+            es = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
+            model.fit(X, y, epochs=int(train_epochs), batch_size=int(batch_size),
+                      verbose=0, validation_split=0.1, callbacks=[es])
+        else:
+            es = EarlyStopping(monitor="loss", patience=3, restore_best_weights=True)
+            model.fit(X, y, epochs=int(train_epochs), batch_size=int(batch_size),
+                      verbose=0, callbacks=[es])
+
         model.save(model_path)
     else:
         model = load_model(model_path)
@@ -231,39 +241,37 @@ except Exception as e:
     st.error(f"Model training/loading failed: {e}")
     st.stop()
 
-# Generate LSTM forecast
-forecast = None
-forecast_dates = None
+# === Generate LSTM Forecast ===
+forecast_df = None
 try:
     last_seq = scaled[-lookback:].reshape(1, lookback, 1)
     forecast_scaled = []
     current_seq = last_seq.copy()
+
     for _ in range(int(forecast_days)):
         pred = model.predict(current_seq, verbose=0)
-        pred_val = float(pred[0,0])
+        pred_val = float(pred[0, 0])
         forecast_scaled.append([pred_val])
-        new_step = np.array(pred).reshape(1,1,1)
-        current_seq = np.concatenate([current_seq[:,1:,:], new_step], axis=1)
+        new_step = np.array(pred).reshape(1, 1, 1)
+        current_seq = np.concatenate([current_seq[:, 1:, :], new_step], axis=1)
 
+    # Inverse transform to get real stock prices
     forecast_arr = np.array(forecast_scaled).reshape(-1, 1)
-    forecast = scaler.inverse_transform(forecast_arr).flatten()
+    forecast_values = scaler.inverse_transform(forecast_arr).flatten()
+
+    # Future business days
     last_date = df.index[-1]
     forecast_dates = pd.bdate_range(last_date + BDay(1), periods=int(forecast_days))
-    forecast_dates = pd.to_datetime(forecast_dates)  # ✅ force datetime
-    forecast = forecast[:len(forecast_dates)]
+
+    forecast_df = pd.DataFrame({
+        "Date": pd.to_datetime(forecast_dates),
+        "Predicted Close": forecast_values
+    })
 except Exception as e:
     st.error(f"Forecast generation failed: {e}")
 
-# Plot forecast
-forecast_fig = go.Figure()
-forecast_fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Historical", line=dict(color="royalblue")))
-if forecast is not None and forecast_dates is not None:
-    forecast_fig.add_trace(go.Scatter(
-        x=pd.to_datetime(forecast_dates), y=forecast, name="LSTM Forecast",
-        line=dict(dash="dot", color="orange"), mode="lines+markers"
-    ))
-
-# Holt-Winters
+# === Holt-Winters Forecast ===
+hw_forecast = None
 if compare_hw:
     try:
         max_sp = max(2, len(df) // 20)
@@ -272,17 +280,44 @@ if compare_hw:
             hw_model = ExponentialSmoothing(df['Close'], trend="add", seasonal="add", seasonal_periods=seasonal_periods)
             hw_fit = hw_model.fit()
             hw_forecast = hw_fit.forecast(int(forecast_days))
-            hw_forecast.index = pd.to_datetime(hw_forecast.index)  # ✅ ensure datetime
-            forecast_fig.add_trace(go.Scatter(
-                x=hw_forecast.index, y=hw_forecast, name="Holt-Winters Forecast",
-                line=dict(color="green", dash="dash")
-            ))
+            hw_forecast.index = pd.to_datetime(hw_forecast.index)
         else:
             st.info("Not enough data for Holt-Winters seasonal model; skipping.")
     except Exception as e:
         st.warning(f"Holt-Winters forecast failed: {e}")
 
+# === Forecast Plotting ===
+forecast_fig = go.Figure()
+
+# Historical
+forecast_fig.add_trace(go.Scatter(
+    x=df.index,
+    y=df['Close'],
+    name="Historical",
+    line=dict(color="royalblue")
+))
+
+# LSTM
+if forecast_df is not None and not forecast_df.empty:
+    forecast_fig.add_trace(go.Scatter(
+        x=forecast_df["Date"],
+        y=forecast_df["Predicted Close"],
+        name="LSTM Forecast",
+        line=dict(dash="dot", color="orange"),
+        mode="lines+markers"
+    ))
+
+# Holt-Winters
+if hw_forecast is not None:
+    forecast_fig.add_trace(go.Scatter(
+        x=hw_forecast.index,
+        y=hw_forecast.values,
+        name="Holt-Winters Forecast",
+        line=dict(dash="dash", color="green")
+    ))
+
 forecast_fig.update_layout(
+    title=f"{ticker} — Forecast",
     xaxis_title="Date",
     yaxis_title="Stock Price",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -291,7 +326,23 @@ forecast_fig.update_layout(
 )
 st.plotly_chart(forecast_fig, use_container_width=True)
 
-# Evaluation
+# === Show Forecast Table + Download ===
+if forecast_df is not None:
+    st.subheader("📅 Predicted Stock Prices")
+    display_df = forecast_df.copy()
+    display_df["Predicted Close"] = display_df["Predicted Close"].round(2)
+    display_df = display_df.set_index("Date")
+    st.dataframe(display_df)
+
+    csv = display_df.to_csv().encode("utf-8")
+    st.download_button(
+        label="📥 Download forecast as CSV",
+        data=csv,
+        file_name=f"{ticker}_forecast.csv",
+        mime="text/csv"
+    )
+
+# === Evaluation (Training Data Only) ===
 try:
     pred_train = model.predict(X, verbose=0)
     pred_train_rescaled = scaler.inverse_transform(pred_train.reshape(-1, 1))
