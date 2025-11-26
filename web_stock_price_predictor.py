@@ -1,4 +1,4 @@
-# app.py 
+# app.py
 
 import streamlit as st
 import yfinance as yf
@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import plotly.graph_objects as go
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from pandas.tseries.offsets import BDay
 import os
 import tempfile
@@ -25,7 +24,7 @@ except Exception:
     from keras.callbacks import EarlyStopping
 
 st.set_page_config(layout="wide", page_title="Stock Predictor")
-st.title("📈 Stock Price Predictor")
+st.title("📈 Stock Price Predictor (Faster)")
 
 # ---------------------------
 # Helper functions
@@ -63,9 +62,9 @@ def add_macd(df, fast=12, slow=26, signal=9):
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_data(ticker, start_date, end_date, auto_adjust=False):
-    df = yf.download(ticker, start=start_date, end=end_date, auto_adjust=auto_adjust)
+    df = yf.download(ticker, start=start_date, end=end_date, auto_adjust=auto_adjust, progress=False)
     if df.empty:
         return df
     expected_cols = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
@@ -80,7 +79,7 @@ def load_data(ticker, start_date, end_date, auto_adjust=False):
 # ---------------------------
 # LSTM utilities
 # ---------------------------
-def create_sequences(values, lookback=100):
+def create_sequences(values, lookback=60):
     vals = np.array(values)
     if vals.ndim == 1:
         vals = vals.reshape(-1, 1)
@@ -95,13 +94,14 @@ def create_sequences(values, lookback=100):
     return X, y
 
 
-def build_lstm_model(input_shape, units1=128, units2=64, dropout=0.2):
+def build_lstm_model(input_shape, units1=64, units2=32, dropout=0.2):
+    # smaller model => faster training
     model = Sequential()
     model.add(LSTM(units1, return_sequences=True, input_shape=input_shape))
     model.add(Dropout(dropout))
     model.add(LSTM(units2, return_sequences=False))
     model.add(Dropout(dropout))
-    model.add(Dense(25, activation='relu'))
+    model.add(Dense(16, activation='relu'))
     model.add(Dense(1))
     model.compile(optimizer='adam', loss='mean_squared_error')
     return model
@@ -117,8 +117,16 @@ if ticker == "Other":
     ticker = st.sidebar.text_input("Enter ticker symbol", value="GOOG").upper()
 
 end_date = st.sidebar.date_input("End date", value=datetime.now().date())
-start_limit = datetime.now().date() - timedelta(days=365 * 20)
-start_date = st.sidebar.date_input("Start date", value=start_limit, min_value=start_limit, max_value=end_date)
+
+# use last 5 years by default instead of 20
+default_start = datetime.now().date() - timedelta(days=365 * 5)
+start_date = st.sidebar.date_input(
+    "Start date",
+    value=default_start,
+    min_value=datetime.now().date() - timedelta(days=365 * 20),
+    max_value=end_date
+)
+
 auto_adjust = st.sidebar.checkbox("Auto adjust data (use Adj Close)", value=False)
 
 st.sidebar.subheader("Indicators")
@@ -128,35 +136,44 @@ show_rsi = st.sidebar.checkbox("Show RSI (14)", value=True)
 show_macd = st.sidebar.checkbox("Show MACD", value=True)
 
 st.sidebar.subheader("Model & Forecast")
-lookback = int(st.sidebar.number_input("LSTM lookback (days)", min_value=10, max_value=500, value=100, step=10))
-train_epochs = int(st.sidebar.number_input("Train epochs", min_value=1, max_value=200, value=10))
-batch_size = int(st.sidebar.number_input("Batch size", min_value=1, max_value=256, value=16))
+lookback = int(st.sidebar.number_input("LSTM lookback (days)", min_value=10, max_value=200, value=60, step=10))
+train_epochs = int(st.sidebar.number_input("Train epochs", min_value=1, max_value=50, value=7))
+batch_size = int(st.sidebar.number_input("Batch size", min_value=8, max_value=256, value=32))
 forecast_days = int(st.sidebar.number_input("Forecast days (multi-step)", min_value=1, max_value=60, value=7))
-compare_hw = st.sidebar.checkbox("Compare with Holt-Winters", value=True)
-retrain = st.sidebar.button("Retrain LSTM (use current settings)")
+
+enable_forecast = st.sidebar.checkbox("Enable LSTM Forecast", value=True)
+run_forecast = st.sidebar.button("🚀 Run / Update Forecast")
+retrain = st.sidebar.checkbox("Retrain model (ignore saved)", value=False)
 
 # ---------------------------
 # Load data
 # ---------------------------
-data_load_state = st.text("Downloading data...")
+data_load_state = st.empty()
+data_load_state.text("Downloading data...")
 df = load_data(ticker, start_date, end_date + timedelta(days=1), auto_adjust=auto_adjust)
+data_load_state.empty()
+
 if df.empty:
     st.error("No data found for ticker. Check symbol or date range.")
     st.stop()
-data_load_state.text("Data downloaded ✅")
 
 if not isinstance(df.index, pd.DatetimeIndex):
     df.index = pd.to_datetime(df.index)
 
-if show_ma: df = add_moving_averages(df)
-if show_bb: df = add_bollinger_bands(df)
-if show_rsi: df = add_rsi(df)
-if show_macd: df = add_macd(df)
+if show_ma:
+    df = add_moving_averages(df)
+if show_bb:
+    df = add_bollinger_bands(df)
+if show_rsi:
+    df = add_rsi(df)
+if show_macd:
+    df = add_macd(df)
 
 # ---------------------------
 # Main Layout
 # ---------------------------
 left, right = st.columns([3, 1])
+
 with left:
     st.subheader(f"{ticker} — Closing Price & Indicators")
     fig = go.Figure()
@@ -168,14 +185,35 @@ with left:
         close=df.get('Close', pd.Series(index=df.index)),
         name='Candlestick'
     ))
+
     if show_ma:
         for w in [20, 50, 100, 200]:
             col = f"MA_{w}"
             if col in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df[col], mode='lines', name=f"MA {w}", opacity=0.8))
+                fig.add_trace(go.Scatter(
+                    x=df.index,
+                    y=df[col],
+                    mode='lines',
+                    name=f"MA {w}",
+                    opacity=0.8
+                ))
+
     if show_bb and 'BB_upper' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_upper'], name='BB Upper', line=dict(width=1), opacity=0.6))
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_lower'], name='BB Lower', line=dict(width=1), opacity=0.6))
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['BB_upper'],
+            name='BB Upper',
+            line=dict(width=1),
+            opacity=0.6
+        ))
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['BB_lower'],
+            name='BB Lower',
+            line=dict(width=1),
+            opacity=0.6
+        ))
+
     fig.update_layout(height=600, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -203,141 +241,195 @@ with right:
     stats = df['Close'].describe().rename(index={'50%': 'median'})
     st.write(stats)
 
-# === Forecasting ===
-st.subheader("🔮 Forecasting")
-
-# Chronological train/validation split
-train_size = int(len(df) * 0.8)
-train_vals = df[['Close']].iloc[:train_size].values
-test_vals = df[['Close']].iloc[train_size:].values
-
-scaler = MinMaxScaler(feature_range=(0, 1))
-scaler.fit(train_vals)
-scaled_all = scaler.transform(df[['Close']].values)
-
-orig_lookback = int(lookback)
-if len(scaled_all) <= lookback:
-    lookback = max(10, min(orig_lookback, max(2, len(scaled_all)//2)))
-    st.warning(f"Dataset is short for lookback {orig_lookback}. Using lookback={lookback}.")
-
-X_all, y_all = create_sequences(scaled_all, lookback)
-split_idx = int(0.8 * len(X_all))
-X_train, y_train = X_all[:split_idx], y_all[:split_idx]
-X_val, y_val = X_all[split_idx:], y_all[split_idx:]
-
-if X_all.ndim == 2:
-    X_all = X_all.reshape(X_all.shape[0], X_all.shape[1], 1)
-if X_train.ndim == 2:
-    X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
-    X_val = X_val.reshape(X_val.shape[0], X_val.shape[1], 1)
-
-model_dir = tempfile.gettempdir()
-model_path = os.path.join(model_dir, f"{ticker}_lstm.h5")
-scaler_path = os.path.join(model_dir, f"{ticker}_scaler.pkl")
-
-# Training / loading model
-try:
-    need_train = retrain or (not os.path.exists(model_path))
-    if need_train:
-        model = build_lstm_model((X_train.shape[1], 1))
-        es = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
-        model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=int(train_epochs),
-            batch_size=int(batch_size),
-            shuffle=False,
-            verbose=0,
-            callbacks=[es]
-        )
-        model.save(model_path)
-        joblib.dump(scaler, scaler_path)
-    else:
-        model = load_model(model_path)
-        if os.path.exists(scaler_path):
-            scaler = joblib.load(scaler_path)
-except Exception as e:
-    st.error(f"Model training/loading failed: {e}")
-    st.stop()
-
-# === Generate LSTM Forecast ===
+# ---------------------------
+# Forecasting (only when enabled & button clicked)
+# ---------------------------
 forecast_df = None
-try:
-    last_seq = scaled_all[-lookback:].reshape(1, lookback, 1)
-    forecast_scaled = []
-    current_seq = last_seq.copy()
+model = None
+scaler = None
 
-    for _ in range(int(forecast_days)):
-        pred = model.predict(current_seq, verbose=0)
-        pred_val = float(pred[0, 0])
-        forecast_scaled.append([pred_val])
-        new_step = np.array(pred).reshape(1, 1, 1)
-        current_seq = np.concatenate([current_seq[:, 1:, :], new_step], axis=1)
+if enable_forecast and run_forecast:
+    st.subheader("🔮 Forecasting with LSTM")
 
-    forecast_arr = np.array(forecast_scaled).reshape(-1, 1)
-    forecast_values = scaler.inverse_transform(forecast_arr).flatten()
+    # train/val split
+    train_size = int(len(df) * 0.8)
+    train_vals = df[['Close']].iloc[:train_size].values
 
-    last_date = df.index[-1]
-    forecast_dates = pd.bdate_range(last_date + BDay(1), periods=int(forecast_days))
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(train_vals)
+    scaled_all = scaler.transform(df[['Close']].values)
 
-    forecast_df = pd.DataFrame({
-        "Date": pd.to_datetime(forecast_dates),
-        "Predicted Close": forecast_values
-    })
-except Exception as e:
-    st.error(f"Forecast generation failed: {e}")
+    orig_lookback = int(lookback)
+    if len(scaled_all) <= lookback:
+        lookback = max(10, min(orig_lookback, max(2, len(scaled_all) // 2)))
+        st.warning(f"Dataset is short for lookback {orig_lookback}. Using lookback={lookback}.")
 
-# === Holt-Winters Forecast ===
-hw_forecast = None
-if compare_hw:
-    try:
-        max_sp = max(2, len(df) // 20)
-        seasonal_periods = min(30, max_sp)
-        if len(df) > seasonal_periods * 2:
-            hw_model = ExponentialSmoothing(df['Close'], trend="add", seasonal="add", seasonal_periods=seasonal_periods)
-            hw_fit = hw_model.fit()
-            hw_forecast = hw_fit.forecast(int(forecast_days))
-            hw_forecast.index = pd.to_datetime(hw_forecast.index)
+    X_all, y_all = create_sequences(scaled_all, lookback)
+    if len(X_all) == 0:
+        st.error("Not enough data for the selected lookback. Reduce lookback or increase date range.")
+    else:
+        split_idx = int(0.8 * len(X_all))
+        X_train, y_train = X_all[:split_idx], y_all[:split_idx]
+        X_val, y_val = X_all[split_idx:], y_all[split_idx:]
+
+        if X_train.ndim == 2:
+            X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+        if X_val.ndim == 2:
+            X_val = X_val.reshape(X_val.shape[0], X_val.shape[1], 1)
+
+        model_dir = tempfile.gettempdir()
+        model_path = os.path.join(model_dir, f"{ticker}_lstm_fast.h5")
+        scaler_path = os.path.join(model_dir, f"{ticker}_scaler_fast.pkl")
+
+        try:
+            need_train = retrain or (not os.path.exists(model_path))
+            if need_train:
+                with st.spinner("Training LSTM model..."):
+                    model = build_lstm_model((X_train.shape[1], 1))
+                    es = EarlyStopping(monitor="val_loss", patience=2, restore_best_weights=True)
+                    model.fit(
+                        X_train, y_train,
+                        validation_data=(X_val, y_val) if len(X_val) > 0 else None,
+                        epochs=int(train_epochs),
+                        batch_size=int(batch_size),
+                        shuffle=False,
+                        verbose=0,
+                        callbacks=[es]
+                    )
+                    model.save(model_path)
+                    joblib.dump(scaler, scaler_path)
+            else:
+                model = load_model(model_path)
+                if os.path.exists(scaler_path):
+                    scaler = joblib.load(scaler_path)
+
+            # === Generate LSTM Forecast ===
+            last_seq = scaled_all[-lookback:].reshape(1, lookback, 1)
+            forecast_scaled = []
+            current_seq = last_seq.copy()
+
+            for _ in range(int(forecast_days)):
+                pred = model.predict(current_seq, verbose=0)
+                pred_val = float(pred[0, 0])
+                forecast_scaled.append([pred_val])
+                new_step = np.array(pred).reshape(1, 1, 1)
+                current_seq = np.concatenate([current_seq[:, 1:, :], new_step], axis=1)
+
+            forecast_arr = np.array(forecast_scaled).reshape(-1, 1)
+            forecast_values = scaler.inverse_transform(forecast_arr).flatten()
+
+            last_date = df.index[-1]
+            forecast_dates = pd.bdate_range(last_date + BDay(1), periods=int(forecast_days))
+
+            forecast_df = pd.DataFrame({
+                "Date": pd.to_datetime(forecast_dates),
+                "Predicted Close": forecast_values
+            })
+
+        except Exception as e:
+            st.error(f"Model training/loading or forecast generation failed: {e}")
+
+    # === Buy / Sell / Hold suggestion ===
+    if forecast_df is not None and not forecast_df.empty:
+        last_close = float(df['Close'].iloc[-1])
+        last_pred = float(forecast_df["Predicted Close"].iloc[-1])
+        change_pct = (last_pred - last_close) / last_close * 100.0
+
+        rsi_val = None
+        macd_val = None
+        if 'RSI' in df.columns and not df['RSI'].isna().all():
+            rsi_val = float(df['RSI'].iloc[-1])
+        if 'MACD' in df.columns and not df['MACD'].isna().all():
+            macd_val = float(df['MACD'].iloc[-1])
+
+        action = "Hold / Wait"
+        explanation = []
+
+        if change_pct > 3:
+            if rsi_val is not None and rsi_val < 70:
+                if macd_val is not None and macd_val > 0:
+                    action = "Buy"
+                    explanation.append("Price is expected to rise, RSI is not overbought, MACD shows bullish momentum.")
+                else:
+                    action = "Buy (Cautious)"
+                    explanation.append("Predicted up-move with acceptable RSI; MACD is not strongly bearish.")
+            else:
+                action = "Hold / Wait"
+                explanation.append("Predicted rise, but RSI is already high (possible overbought).")
+        elif change_pct < -3:
+            if rsi_val is not None and rsi_val > 30 and macd_val is not None and macd_val < 0:
+                action = "Sell / Avoid Buying"
+                explanation.append("Price is expected to fall and MACD shows bearish momentum.")
+            else:
+                action = "Hold / Wait"
+                explanation.append("Downside is predicted but indicators are mixed.")
         else:
-            st.info("Not enough data for Holt-Winters seasonal model; skipping.")
-    except Exception as e:
-        st.warning(f"Holt-Winters forecast failed: {e}")
+            action = "Hold / Wait"
+            explanation.append("Forecast suggests only a small move; risk–reward may not be attractive.")
 
-# === Forecast Plotting ===
-forecast_fig = go.Figure()
-forecast_fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Historical", line=dict(color="royalblue")))
-if forecast_df is not None and not forecast_df.empty:
-    forecast_fig.add_trace(go.Scatter(x=forecast_df["Date"], y=forecast_df["Predicted Close"],
-                                      name="LSTM Forecast", line=dict(dash="dot", color="orange"), mode="lines+markers"))
-if hw_forecast is not None:
-    forecast_fig.add_trace(go.Scatter(x=hw_forecast.index, y=hw_forecast.values,
-                                      name="Holt-Winters Forecast", line=dict(dash="dash", color="green")))
-forecast_fig.update_layout(title=f"{ticker} — Forecast", xaxis_title="Date", yaxis_title="Stock Price",
-                           legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                           template="plotly_dark", height=500)
-st.plotly_chart(forecast_fig, use_container_width=True)
+        st.markdown("### 💡 Suggested Action (Educational Only)")
+        col_a, col_b, col_c = st.columns([1, 1, 2])
+        with col_a:
+            st.metric("Suggested Action", action)
+        with col_b:
+            st.metric(f"Expected Change (next {forecast_days} days)", f"{change_pct:.2f}%")
+        with col_c:
+            st.write("**Reasoning**")
+            st.write("- " + "\n- ".join(explanation))
+            extra = []
+            if rsi_val is not None:
+                extra.append(f"RSI: {rsi_val:.2f}")
+            if macd_val is not None:
+                extra.append(f"MACD: {macd_val:.4f}")
+            if extra:
+                st.caption(" | ".join(extra))
+        st.caption("⚠️ This is NOT financial advice. For learning/demo purposes only.")
 
-# === Show Forecast Table + Download ===
-if forecast_df is not None:
-    st.subheader("📅 Predicted Stock Prices")
-    display_df = forecast_df.copy()
-    display_df["Predicted Close"] = display_df["Predicted Close"].round(2)
-    display_df = display_df.set_index("Date")
-    st.dataframe(display_df)
-    csv = display_df.to_csv().encode("utf-8")
-    st.download_button(label="📥 Download forecast as CSV", data=csv, file_name=f"{ticker}_forecast.csv", mime="text/csv")
+        # === Future-only Forecast Plot ===
+        st.subheader("📆 Future Forecast (LSTM Only)")
+        future_fig = go.Figure()
+        future_fig.add_trace(go.Scatter(
+            x=forecast_df["Date"],
+            y=forecast_df["Predicted Close"],
+            name="Future LSTM Forecast",
+            mode="lines+markers"
+        ))
+        future_fig.update_layout(
+            title=f"{ticker} — Next {forecast_days} Trading Days (Predicted)",
+            xaxis_title="Date",
+            yaxis_title="Predicted Close Price",
+            height=400
+        )
+        st.plotly_chart(future_fig, use_container_width=True)
 
-# === Validation Evaluation ===
-try:
-    pred_val = model.predict(X_val, verbose=0)
-    pred_val_rescaled = scaler.inverse_transform(pred_val.reshape(-1, 1))
-    y_val_rescaled = scaler.inverse_transform(y_val.reshape(-1, 1))
+        # === Table + Download ===
+        st.subheader("📅 Predicted Stock Prices")
+        display_df = forecast_df.copy()
+        display_df["Predicted Close"] = display_df["Predicted Close"].round(2)
+        display_df = display_df.set_index("Date")
+        st.dataframe(display_df)
+        csv = display_df.to_csv().encode("utf-8")
+        st.download_button(
+            label="📥 Download forecast as CSV",
+            data=csv,
+            file_name=f"{ticker}_forecast_fast.csv",
+            mime="text/csv"
+        )
 
-    mse = mean_squared_error(y_val_rescaled, pred_val_rescaled)
-    mae = mean_absolute_error(y_val_rescaled, pred_val_rescaled)
-    r2 = r2_score(y_val_rescaled, pred_val_rescaled)
+        # === Validation Evaluation ===
+        try:
+            if 'X_val' in locals() and len(X_val) > 0:
+                pred_val = model.predict(X_val, verbose=0)
+                pred_val_rescaled = scaler.inverse_transform(pred_val.reshape(-1, 1))
+                y_val_rescaled = scaler.inverse_transform(y_val.reshape(-1, 1))
 
-    st.markdown("### 📊 Model Evaluation (Validation Data)")
-    st.write({"MSE": float(mse), "MAE": float(mae), "R2": float(r2)})
-except Exception as e:
-    st.warning(f"Evaluation failed: {e}")
+                mse = mean_squared_error(y_val_rescaled, pred_val_rescaled)
+                mae = mean_absolute_error(y_val_rescaled, pred_val_rescaled)
+                r2 = r2_score(y_val_rescaled, pred_val_rescaled)
+
+                st.markdown("### 📊 Model Evaluation (Validation Data)")
+                st.write({"MSE": float(mse), "MAE": float(mae), "R2": float(r2)})
+            else:
+                st.info("Not enough validation data to compute evaluation metrics.")
+        except Exception as e:
+            st.warning(f"Evaluation failed: {e}")
