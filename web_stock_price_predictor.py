@@ -386,7 +386,7 @@ if enable_forecast and run_forecast:
         st.caption("⚠️ This is NOT financial advice. For learning/demo purposes only.")
 
         # === Future-only Forecast Plot ===
-        st.subheader("📆 Future Forecast (LSTM Only)")
+        st.subheader("Future Forecast (LSTM Only)")
         future_fig = go.Figure()
         future_fig.add_trace(go.Scatter(
             x=forecast_df["Date"],
@@ -403,14 +403,14 @@ if enable_forecast and run_forecast:
         st.plotly_chart(future_fig, use_container_width=True)
 
         # === Table + Download ===
-        st.subheader("📅 Predicted Stock Prices")
+        st.subheader("Predicted Stock Prices")
         display_df = forecast_df.copy()
         display_df["Predicted Close"] = display_df["Predicted Close"].round(2)
         display_df = display_df.set_index("Date")
         st.dataframe(display_df)
         csv = display_df.to_csv().encode("utf-8")
         st.download_button(
-            label="📥 Download forecast as CSV",
+            label="Download forecast as CSV",
             data=csv,
             file_name=f"{ticker}_forecast_fast.csv",
             mime="text/csv"
