@@ -24,11 +24,11 @@ except Exception:
     from keras.callbacks import EarlyStopping
 
 st.set_page_config(layout="wide", page_title="Stock Predictor")
-st.title("📈 Stock Price Predictor (Faster)")
+st.title("Stock Price Predictor ")
 
-# ---------------------------
+
 # Helper functions
-# ---------------------------
+
 def add_moving_averages(df, windows=[20, 50, 100, 200]):
     for w in windows:
         df[f"MA_{w}"] = df['Close'].rolling(window=w).mean()
@@ -76,9 +76,9 @@ def load_data(ticker, start_date, end_date, auto_adjust=False):
     return df
 
 
-# ---------------------------
+
 # LSTM utilities
-# ---------------------------
+
 def create_sequences(values, lookback=60):
     vals = np.array(values)
     if vals.ndim == 1:
@@ -107,9 +107,9 @@ def build_lstm_model(input_shape, units1=64, units2=32, dropout=0.2):
     return model
 
 
-# ---------------------------
+
 # Sidebar
-# ---------------------------
+
 st.sidebar.header("Settings")
 popular = ["GOOG", "AAPL", "MSFT", "TSLA", "AMZN", "NVDA", "META"]
 ticker = st.sidebar.selectbox("Select ticker", popular + ["Other"], index=0)
@@ -145,9 +145,9 @@ enable_forecast = st.sidebar.checkbox("Enable LSTM Forecast", value=True)
 run_forecast = st.sidebar.button("🚀 Run / Update Forecast")
 retrain = st.sidebar.checkbox("Retrain model (ignore saved)", value=False)
 
-# ---------------------------
+
 # Load data
-# ---------------------------
+
 data_load_state = st.empty()
 data_load_state.text("Downloading data...")
 df = load_data(ticker, start_date, end_date + timedelta(days=1), auto_adjust=auto_adjust)
@@ -169,9 +169,9 @@ if show_rsi:
 if show_macd:
     df = add_macd(df)
 
-# ---------------------------
+
 # Main Layout
-# ---------------------------
+
 left, right = st.columns([3, 1])
 
 with left:
@@ -241,9 +241,9 @@ with right:
     stats = df['Close'].describe().rename(index={'50%': 'median'})
     st.write(stats)
 
-# ---------------------------
+
 # Forecasting (only when enabled & button clicked)
-# ---------------------------
+
 forecast_df = None
 model = None
 scaler = None
@@ -433,3 +433,6 @@ if enable_forecast and run_forecast:
                 st.info("Not enough validation data to compute evaluation metrics.")
         except Exception as e:
             st.warning(f"Evaluation failed: {e}")
+
+
+
